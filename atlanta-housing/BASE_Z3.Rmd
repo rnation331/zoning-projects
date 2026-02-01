@@ -1,0 +1,225 @@
+---
+title: "The Sprawl Tax: Current Atlanta Zoning Map"
+output: html_document
+date: "2025-03-26"
+---
+## 🗺️ How to Use This Map
+
+- Use the **layer control** (top-right corner of the map) to toggle:
+  - **Zoning categories**: Single Family, Multi Family, Commercial.
+  - **Economic overlays**: Median Income, Median Home Value.
+  - **Social overlays**: % Black, % White, % Asian, % Hispanic.
+- You can turn **multiple layers on or off** at the same time.
+- Click on areas for more detailed information.
+- Zoom and pan the map to explore specific neighborhoods in Atlanta.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, include = TRUE)
+```
+```{r}
+library(ggplot2)
+library(sf)
+library(dplyr)
+library(leaflet)
+library(leaflet.extras)
+library(tidycensus)
+library(tidyr)
+library(tigris)
+library(leaflet.extras2)
+census_api_key(Sys.getenv("CENSUS_API_KEY"), install = FALSE)
+options(tigris_use_cache = TRUE)
+
+zoning_atl_json <- st_read("/Users/ryannation/Downloads/Official_Lots_with_Zoning_.geojson", quiet = TRUE)
+zoning_atl_csv <- read.csv("/Users/ryannation/Downloads/Official_Lots_with_Zoning_.csv")
+
+ga_places <- places(state = "GA", year = 2021)
+atlanta_city_limit <- ga_places %>% filter(NAME == "Atlanta")
+
+acs_dem <- c(
+  median_income = "B19013_001")
+atlanta_acs <- get_acs(
+  geography = "tract",
+  variables = acs_dem,
+  state = "GA",
+  county = "Fulton",
+  geometry = TRUE,
+  year = 2021)
+
+merged_atl <- zoning_atl_json %>%
+  left_join(zoning_atl_csv, by = "OBJECTID_12") %>%
+  rename(ZONINGCODE = ZONINGCODE.x) %>%
+  rename(AREA = AREA.x) %>%
+  select(OBJECTID_12, ZONINGCODE, AREA, geometry)
+
+merged_atl <-st_zm(merged_atl, drop = TRUE, what = "ZM")
+
+single_family <- "Single Family Residential"
+multi_family <- "Multi-Family Residential"
+commercial_types <- c("Commercial", "Industrial", "Special Public Interest")
+
+merged_atl <- merged_atl %>%
+  mutate(ZONING_CATEGORY = case_when(
+    ZONINGCODE == single_family ~ "Single Family Residential",
+    ZONINGCODE == multi_family ~ "Multi-Family Residential",
+    ZONINGCODE %in% commercial_types ~ "Commercial",
+    TRUE ~ NA_character_)) %>%
+  filter(!is.na(ZONING_CATEGORY))
+
+filtered_zones <- merged_atl %>%
+  filter(st_is_valid(geometry)) %>%
+  group_by(ZONING_CATEGORY) %>%
+  summarize(geometry = st_union(geometry), .groups = "drop")
+
+zoning_pal <- colorFactor(
+  palette = c("black", "black", "black"),
+  domain = filtered_zones$ZONING_CATEGORY)
+
+atlanta_acs <- st_transform(atlanta_acs, crs = st_crs(filtered_zones))
+atlanta_city_limit <- st_transform(atlanta_city_limit, crs = st_crs(atlanta_acs))
+
+income_data <- atlanta_acs %>%
+  filter(variable == "median_income") %>%
+  filter(st_intersects(., atlanta_city_limit, sparse = FALSE))
+income_pal <- colorNumeric(palette = "Oranges", domain = income_data$estimate)
+
+race_pct <- get_acs(
+  geography = "tract",
+  variables = c(
+    total = "B02001_001",
+    black = "B02001_003",
+    white = "B02001_002",
+    asian = "B02001_005",
+    hispanic = "B03003_003"),
+  state = "GA",
+  county = "Fulton",
+  geometry = TRUE,
+  year = 2021) %>%
+  select(GEOID, variable, estimate, geometry) %>%
+  st_transform(st_crs(filtered_zones))
+
+race_pct_wide <- race_pct %>%
+  st_set_geometry(NULL) %>%
+  pivot_wider(names_from = variable, values_from = estimate) %>%
+  mutate(
+    pct_black = (black / total) * 100,
+    pct_white = (white / total) * 100,
+    pct_asian = (asian / total) * 100,
+    pct_hispanic = (hispanic / total) * 100)
+geometry_data <- race_pct %>% distinct(GEOID, geometry)
+race_pct_wide <- left_join(race_pct_wide, geometry_data, by = "GEOID")
+race_pct_wide <- st_as_sf(race_pct_wide) %>%
+  filter(st_intersects(., atlanta_city_limit, sparse = FALSE))
+
+black_palette <- colorNumeric("Greens", domain = race_pct_wide$pct_black)
+white_palette <- colorNumeric("Blues", domain = race_pct_wide$pct_white)
+asian_palette <- colorNumeric("Purples", domain = race_pct_wide$pct_asian)
+hispanic_palette <- colorNumeric("BuPu", domain = race_pct_wide$pct_hispanic)
+
+home_value_var <- c(median_home_value = "B25077_001")
+home_value_data <- get_acs(
+  geography = "tract",
+  variables = home_value_var,
+  state = "GA",
+  county = "Fulton",
+  geometry = TRUE,
+  year = 2021)
+
+home_palette <- colorNumeric("Reds", domain = home_value_data$estimate, na.color = "transparent")
+
+race_data <- st_transform(race_pct_wide, crs = st_crs(filtered_zones))
+home_value_data <- st_transform(home_value_data, crs = st_crs(atlanta_acs))
+home_value_data <- home_value_data %>%
+  filter(st_intersects(., atlanta_city_limit, sparse = FALSE)) %>%
+  st_transform(home_value_data, crs = st_crs(filtered_zones))
+
+atl_map <- leaflet(filtered_zones) %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addPolylines(
+    data = st_transform(atlanta_city_limit, crs = st_crs(filtered_zones)),
+    color = "black",
+    weight = 3,
+    label = "City of Atlanta",
+    group = "City Limits") %>%
+  addPolygons(
+    data = filtered_zones %>% filter(ZONING_CATEGORY == "Single Family Residential"),
+    fillColor = ~zoning_pal(ZONING_CATEGORY),
+    fillOpacity = 1,
+    color = NA,
+    weight = 0,
+    label = ~paste("Zoning:", ZONING_CATEGORY),
+    group = "Zoning: Single Family") %>%
+  addPolygons(
+    data = filtered_zones %>% filter(ZONING_CATEGORY == "Multi-Family Residential"),
+    fillColor = ~zoning_pal(ZONING_CATEGORY),
+    fillOpacity = 1,
+    color = NA,
+    weight = 0,
+    label = ~paste("Zoning:", ZONING_CATEGORY),
+    group = "Zoning: Multi Family") %>%
+  addPolygons(
+    data = filtered_zones %>% filter(ZONING_CATEGORY == "Commercial"),
+    fillColor = ~zoning_pal(ZONING_CATEGORY),
+    fillOpacity = 1,
+    color = NA,
+    weight = 0,
+    label = ~paste("Zoning:", ZONING_CATEGORY),
+    group = "Zoning: Commercial") %>%
+  addPolygons(
+    data = home_value_data,
+    fillColor = ~home_palette(estimate),
+    fillOpacity = 0.6,
+    color = "black",
+    weight = 0.4,
+    label = ~paste0("Median Home Value: $", formatC(estimate, format = "f", digits = 0, big.mark = ",")),
+    group = "Economic: Median Home Value") %>%
+  addPolygons(
+    data = income_data,
+    fillColor = ~income_pal(estimate),
+    fillOpacity = 0.6,
+    color = "black",
+    weight = 0.4,
+    label = ~paste0("Median Income: $", formatC(estimate, format = "f", digits = 0, big.mark = ",")),
+    group = "Economic: Median Income") %>%
+  addPolygons(
+    data = race_pct_wide,
+    fillColor = ~black_palette(pct_black),
+    fillOpacity = 0.6,
+    color = "black",
+    weight = 0.4,
+    label = ~paste0("Black: ", round(pct_black, 1), "%"),
+    group = "Social: % Black") %>%
+  addPolygons(
+    data = race_pct_wide,
+    fillColor = ~white_palette(pct_white),
+    fillOpacity = 0.6,
+    color = "black",
+    weight = 0.4,
+    label = ~paste0("White: ", round(pct_white, 1), "%"),
+    group = "Social: % White") %>%
+  addPolygons(
+    data = race_pct_wide,
+    fillColor = ~asian_palette(pct_asian),
+    fillOpacity = 0.6,
+    color = "black",
+    weight = 0.4,
+    label = ~paste0("Asian: ", round(pct_asian, 1), "%"),
+    group = "Social: % Asian") %>%
+  addPolygons(
+    data = race_pct_wide,
+    fillColor = ~hispanic_palette(pct_hispanic),
+    fillOpacity = 0.6,
+    color = "black",
+    weight = 0.4,
+    label = ~paste0("Hispanic: ", round(pct_hispanic, 1), "%"),
+    group = "Social: % Hispanic") %>%
+  addLayersControl(
+    baseGroups = c("Zoning: Single Family", "Zoning: Multi Family", "Zoning: Commercial"),
+    overlayGroups = c("Economic: Median Home Value", "Economic: Median Income", 
+      "Social: % Black", "Social: % White", "Social: % Asian", "Social: % Hispanic"),
+    options = layersControlOptions(collapsed = FALSE)) %>%
+  hideGroup(c("Economic: Median Home Value", "Economic: Median Income", 
+      "Social: % Black", "Social: % White", "Social: % Asian", "Social: % Hispanic")) %>%
+  setView(lng = -84.388, lat = 33.748, zoom = 10.7)
+
+atl_map
+```
