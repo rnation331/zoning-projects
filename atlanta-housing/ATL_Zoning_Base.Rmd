@@ -1,0 +1,65 @@
+---
+title: "CSE 6242 Project Zoning"
+output: html_document
+date: "2025-03-18"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(leafgl)
+library(ggplot2)
+library(sf)
+library(dplyr)
+library(leaflet)
+library(terra)
+
+zoning_atl_json <- st_read("/Users/ryannation/Downloads/Official_Lots_with_Zoning_.geojson", quiet = TRUE)
+
+zoning_atl_csv <- read.csv("/Users/ryannation/Downloads/Official_Lots_with_Zoning_.csv")
+
+merged_atl <- zoning_atl_json %>%
+  left_join(zoning_atl_csv, by = "OBJECTID_12") %>%
+  rename(ZONINGCODE = ZONINGCODE.x) %>%
+  select(OBJECTID_12, ZONINGCODE, geometry) %>%
+  st_zm(drop = TRUE, what = "ZM")
+
+v <- vect(merged_atl)
+v_valid <- makeValid(v)
+merged_atl_valid <- st_as_sf(v_valid) %>%
+  st_cast("POLYGON", warn = FALSE)
+
+merged_atl_valid <- st_transform(merged_atl_valid, 4326)
+
+merged_atl_valid <- st_simplify(merged_atl_valid, preserveTopology = TRUE, dTolerance = 0.001)
+
+geo_json <- geojsonsf::sf_geojson(merged_atl_valid)
+
+atl_map <-leaflet() %>%
+  addTiles() %>%
+  addPolygons(
+    data = merged_atl_valid %>%
+      mutate(color = case_when(
+        ZONINGCODE == "Commercial" ~ "#FF0000",
+        ZONINGCODE == "Fulton County Residential" ~ "#FFA500",
+        ZONINGCODE == "Historic" ~ "#FFFF00",
+        ZONINGCODE == "Industrial" ~ "#008000",
+        ZONINGCODE == "Landmark District" ~ "#008080",
+        ZONINGCODE == "Live Work" ~ "#0000FF",
+        ZONINGCODE == "Multi-Family Residential" ~ "#4B0082",
+        ZONINGCODE == "Neighborhood Commercial District" ~ "#800080",
+        ZONINGCODE == "Office-Institutional" ~ "#FF69B4",
+        ZONINGCODE == "Planned Development" ~ "#A0522D",
+        ZONINGCODE == "Single Family Residential" ~ "#808080",
+        ZONINGCODE == "Special Public Interest" ~ "#000000",
+        TRUE ~ "#7f7f7f"
+      )),
+    fillColor = ~color,
+    fillOpacity = 0.7,
+    weight = 0.01,
+    popup = ~ZONINGCODE,
+    label = ~ZONINGCODE)
+atl_map
+```
