@@ -1,0 +1,111 @@
+---
+title: "Seattle & San Jose Housing Mix"
+output: html_document
+date: "2025-04-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, include = TRUE)
+```
+```{r}
+library(ggplot2)
+library(sf)
+library(dplyr)
+library(leaflet)
+library(leaflet.extras)
+
+seattle_json <- st_read("/Users/ryannation/Downloads/sprawl/seattle_zones.geojson")
+seattle_csv <- read.csv("/Users/ryannation/Downloads/sprawl/seattle_zones.csv")
+sanjose_json <- st_read("/Users/ryannation/Downloads/sprawl/sanjose_zones.geojson")
+sanjose_csv <- read.csv("/Users/ryannation/Downloads/sprawl/sanjose_zones.csv")
+
+merged_seattle <- seattle_json %>%
+  left_join(seattle_csv, by = "OBJECTID") %>%
+  select(OBJECTID, Category, geometry) %>%
+  st_zm(drop =TRUE, what = "ZM") %>%
+  mutate(geom_seattle = geometry) %>%
+  select(-geometry)
+
+merged_sanjose <- sanjose_json %>%
+  left_join(sanjose_csv, by = "OBJECTID") %>%
+  select(OBJECTID, ZONING.x, geometry) %>%
+  st_zm(drop = TRUE, what = "ZM") %>%
+  mutate(geom_sanjose = geometry) %>%
+  select(-geometry)
+
+merged_seattle <- merged_seattle %>%
+  mutate(ZONINGS = case_when(
+    Category %in% c("Residential Small Lot", "Master Planned Community", "Neighborhood Residential") ~ "Single Family Residential",
+    Category %in% c("High-Density Multi-Family", "Lowrise Multi-Family") ~ "Multi-Family Residential",
+    Category %in% c("Commercial", "Downtown", "Industrial", "Neighborhood Commercial") ~ "Commercial/Industrial",
+    TRUE ~ NA_character_)) %>%
+  filter(!is.na(ZONINGS))
+
+merged_sanjose <- merged_sanjose %>%
+  mutate(ZONINGSJ = case_when(
+    ZONING.x %in% c("R-1-1", "R-1-2", "R-1-5", "R-1-8", "R-2") ~ "Single Family Residential",
+    ZONING.x %in% c("R-M", "R-MH", "UR") ~ "Multi-Family Residential",
+    ZONING.x %in% c("CO", "CN", "CG", "MUC", "LI", "HI", "IP") ~ "Commercial/Industrial",
+    TRUE ~ NA_character_)) %>%
+  filter(!is.na(ZONINGSJ))
+
+seattle_map <- merged_seattle %>%
+filter(st_is_valid(geom_seattle)) %>%
+  mutate(geom_seattle = st_buffer(geom_seattle, 0),
+         geom_seattle = st_simplify(geom_seattle, dTolerance = 10, preserveTopology = TRUE)) %>%
+  group_by(ZONINGS) %>%
+  summarize(geom_seattle = st_union(geom_seattle), .groups = "drop")
+
+sanjose_map <- merged_sanjose %>%
+filter(st_is_valid(geom_sanjose)) %>%
+  mutate(geom_sanjose = st_buffer(geom_sanjose, 0),
+         geom_sanjose = st_simplify(geom_sanjose, dTolerance = 10, preserveTopology = TRUE)) %>%
+  group_by(ZONINGSJ) %>%
+  summarize(geom_sanjose = st_union(geom_sanjose), .groups = "drop")
+
+seattle_mix <- leaflet(seattle_map) %>%
+  addProviderTiles(providers$Stadia.StamenToner) %>%
+  addPolygons(
+    fillColor = ~case_when(
+      ZONINGS == "Single Family Residential" ~ "blue",
+      ZONINGS == "Multi-Family Residential" ~ "red",
+      ZONINGS == "Commercial/Industrial" ~ "green"),
+    color = NA,
+    weight = 0,
+    opacity = 1,
+    fillOpacity = 0.7,
+    popup = ~ZONINGS,
+    label = ~paste("Zoning", ZONINGS),
+    group = ~ZONINGS) %>%
+      addLayersControl(
+        overlayGroups = c("Single Family Residential", "Multi-Family Residential", "Commercial/Industrial"),
+        options = layersControlOptions(collapsed = FALSE)) %>%
+          addLegend(
+            colors = c("blue", "red", "green"),
+            labels = c("Single Family Residential", "Multi-Family Residential", "Commercial/Industrial"),
+            title = "Land Use/Housing Mix")
+
+sanjose_mix <- leaflet(sanjose_map) %>%
+  addProviderTiles(providers$Stadia.StamenToner) %>%
+  addPolygons(
+    fillColor = ~case_when(
+      ZONINGSJ == "Single Family Residential" ~ "blue",
+      ZONINGSJ == "Multi-Family Residential" ~ "red",
+      ZONINGSJ == "Commercial/Industrial" ~ "green"),
+    color = NA,
+    weight = 0,
+    opacity = 1,
+    fillOpacity = 0.7,
+    popup = ~ZONINGSJ,
+    label = ~paste("Zoning", ZONINGSJ),
+    group = ~ZONINGSJ) %>%
+      addLayersControl(
+        overlayGroups = c("Single Family Residential", "Multi-Family Residential", "Commercial/Industrial"),
+        options = layersControlOptions(collapsed = FALSE)) %>%
+          addLegend(
+            colors = c("blue", "red", "green"),
+            labels = c("Single Family Residential", "Multi-Family Residential", "Commercial/Industrial"),
+            title = "Land Use/Housing Mix")
+seattle_mix
+sanjose_mix
+```
