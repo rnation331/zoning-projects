@@ -1,0 +1,87 @@
+---
+title: "Austin Housing Mix"
+output: html_document
+date: "2025-04-17"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, include = TRUE)
+```
+```{r}
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(ggmap)
+library(mapview)
+library(patchwork)
+library(png)
+library(grid)
+library(webshot)
+ggmap::register_stadiamaps(key = Sys.getenv("STADIAMAPS_API_KEY"))
+
+austin_json <- st_read("/Users/ryannation/Downloads/sprawl/austinzss.geojson", quiet = TRUE)
+austin_csv <- read.csv("/Users/ryannation/Downloads/sprawl/austinzss.csv")
+
+austin_merged <- austin_json %>%
+  left_join(austin_csv %>% rename(objectid = OBJECTID) %>%
+              mutate(objectid = as.character(objectid)),
+            by = "objectid") %>%
+  st_zm(drop = TRUE, what = "ZM") %>%
+  mutate(
+    ZONINGA = case_when(
+      zoning_base == "SF" ~ "Single Family Residential",
+      zoning_base %in% c("MF", "MH", "MU", "DMU") ~ "Multi-Family Residential",
+      zoning_base %in% c("IP", "LO", "GO", "NO", "CBD", "LI", "MI") ~ "Commercial/Industrial",
+      TRUE ~ NA_character_)
+  ) %>%
+  filter(!is.na(ZONINGA)) %>%
+  st_make_valid()
+
+austin_all <- austin_merged %>%
+  group_by(ZONINGA) %>%
+  summarize(geometry = st_union(geometry), .groups = "drop") %>%
+  st_make_valid()
+
+austin_all <- austin_all %>% st_transform(4326)
+
+map <- get_stadiamap(
+  bbox = c(left = -97.8, bottom = 30.2, right = -97.6, top = 30.4), 
+  zoom = 12, 
+  source = "osm")
+
+create_zone_map <- function(zone_data, fill_color, title) {
+  ggmap(map) +
+    geom_sf(
+      data = zone_data,
+      aes(geometry = geometry),
+      fill = fill_color,
+      color = NA,
+      alpha = 0.7,
+      inherit.aes = FALSE
+    ) +
+    labs(title = title) +
+    theme_minimal()}
+
+map_sf <- create_zone_map(
+  filter(austin_all, ZONINGA == "Single Family Residential"),
+  "blue","Single Family Residential")
+
+map_mf <- create_zone_map(
+  filter(austin_all, ZONINGA == "Multi-Family Residential"), 
+  "red","Multi-Family Residential")
+
+map_ci <- create_zone_map(
+  filter(austin_all, ZONINGA == "Commercial/Industrial"),
+  "green","Commercial/Industrial")
+
+austin_full_map <- mapview(austin_all, zcol = "ZONINGA", legend = TRUE, alpha.regions = 0.7,
+        col.regions = c("Single Family Residential" = "blue",
+                        "Multi-Family Residential" = "red",
+                        "Commercial/Industrial" = "green"))
+
+combined_maps <- map_sf + map_mf + map_ci + plot_layout(ncol = 3)
+print(combined_maps)
+austin_full_map
+```
+
+
