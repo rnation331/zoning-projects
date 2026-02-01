@@ -1,0 +1,159 @@
+---
+title: "Airport_Project"
+output: 
+  html_document:
+    code_folding: hide
+date: "2025-04-04"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+library(ggplot2)
+library(sf)
+library(dplyr)
+library(leaflet)
+library(leaflet.extras)
+
+zoning_ep_json <- st_read("/Users/ryannation/Downloads/east_point_zone.geojson", quiet = TRUE)
+zoning_ep_csv <- read.csv("/Users/ryannation/Downloads/east_point_zone.csv")
+zoning_cp_json <- st_read("/Users/ryannation/Downloads/college_park_zone.geojson", quiet = TRUE)
+zoning_cp_csv <- read.csv("/Users/ryannation/Downloads/college_park_zone.csv")
+
+property_data <- read.csv("/Users/ryannation/Downloads/airport_stuff/filtered_property_info.csv")
+
+property_sf <- st_as_sf(
+  property_data,
+  coords = c("XMin", "YMin"),
+  crs = 2240
+)
+
+property_wgs84 <- st_transform(property_sf, 4326)
+
+property_wgs84 <- property_wgs84 %>%
+  mutate(is_vacant = LandUse %in% c("Vacant Exempt Land", "Vacant Industrial Land", "Vacant Commercial Land", "Residential vacant", "Apartment Vacant Land"))
+
+property_wgs84 <- property_wgs84 %>%
+  filter(Price > 0) %>%
+  mutate(
+    price_bin = case_when(
+      Price <= 50000 ~ "1-50k",
+      Price <= 100000 ~ "50k-100k",
+      Price <= 250000 ~ "100k-250k",
+      Price <= 500000 ~ "250k-500k",
+      Price <= 750000 ~ "500k-750k",
+      Price <= 1000000 ~ "750k-1M",
+      Price <= 5000000 ~ "1M-5M",
+      Price <= 10000000 ~ "5M-10M",
+      TRUE ~ "10M+"))
+
+merged_ep <- zoning_ep_json %>%
+  left_join(zoning_ep_csv, by = "ParcelID") %>%
+  rename(ClassCode = ClassCode.x) %>%
+  select(ParcelID, ClassCode, geometry)
+merged_ep <- st_zm(merged_ep, drop = TRUE, what = "ZM")
+
+merged_cp <- zoning_cp_json %>%
+  left_join(zoning_cp_csv, by = "OBJECTID") %>%
+  select(OBJECTID, LandUseName, geometry)
+merged_cp <- st_zm(merged_cp, drop = TRUE, what = "ZM")
+
+residential_types_ep <- c("R3", "R4", "R5")
+commercial_types_ep <- c("E1", "C1", "C3", "C4", "C5")
+
+residential_types_cp <- c("RES_HIGH", "RES_MED", "RES_LOW", "RES_MULTI", "RES_MOBILE")
+commercial_types_cp <- c("COMMERCIAL", "INDUSTRIAL")
+other_types_cp <- c("FOREST", "TRANSITIONAL", "URBAN_OTHER", "LANDFILLS", "PARKS", "PARK_LAND")
+
+merged_ep <- merged_ep %>%
+  mutate(ZONING_CATEGORY = case_when(
+    ClassCode == "R3" ~ "Single Family Residential",
+    ClassCode %in% c("R4", "R5") ~ "Multi-Family Residential",
+    ClassCode %in% commercial_types_ep ~ "Commercial",
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(ZONING_CATEGORY))
+
+merged_cp <- merged_cp %>%
+  mutate(ZONING_CATEGORY = case_when(
+    LandUseName %in% c("RES_LOW", "RES_MED") ~ "Single Family Residential",
+    LandUseName %in% c("RES_HIGH", "RES_MULTI", "RES_MOBILE") ~ "Multi-Family Residential",
+    LandUseName %in% commercial_types_cp ~ "Commercial",
+    LandUseName %in% other_types_cp ~ "Public Land",
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(ZONING_CATEGORY))
+
+price_pal <- colorFactor(
+  palette = "viridis",
+  domain = property_wgs84$price_bin,
+  ordered = TRUE)
+
+all_zones <- bind_rows(merged_ep, merged_cp) %>%
+  filter(st_is_valid(geometry)) %>%
+  mutate(geometry = st_buffer(geometry, 0)) %>%
+  group_by(ZONING_CATEGORY) %>%
+  summarize(geometry = st_union(geometry), .groups = "drop")
+
+airport_current_land <- leaflet(all_zones) %>%
+  addCircleMarkers(
+    data = filter(property_wgs84, !is_vacant),
+    radius = 5,
+    fillOpacity = 0.6,
+    color = ~price_pal(price_bin),
+    popup = ~paste(
+      "Price: $", format(Price, big.mark = ","), "<br>"),
+    label = ~paste("$", format(Price, big.mark = ",")),
+    group = "Property Prices"
+  ) %>%
+  addCircleMarkers(
+    data = filter(property_wgs84, is_vacant),
+    radius = 6,
+    color = "red",
+    fillOpacity = 0.9,
+    popup = ~paste(
+      "<strong>VACANT LOT</strong><br>",
+      "<strong>Price:</strong> $", format(Price, big.mark = ","), "<br>",
+      "<strong>Type:</strong> ", LandUse, "<br>",
+      "<strong>Land Area:</strong> ", LandArea, " acres"
+    ),
+    group = "Vacant Lots"
+  ) %>%
+  addProviderTiles(providers$Stadia.StamenToner) %>%
+  addPolygons(
+    fillColor = ~case_when(
+      ZONING_CATEGORY == "Single Family Residential" ~ "blue",
+      ZONING_CATEGORY == "Multi-Family Residential" ~ "orange",
+      ZONING_CATEGORY == "Commercial" ~ "red",
+      ZONING_CATEGORY == "Public Land" ~ "purple",
+    ),
+    color = "black",
+    weight = 0.1,
+    opacity = 1,
+    fillOpacity = 0.6,
+    popup = ~ZONING_CATEGORY,
+    label = ~paste("Zoning:", ZONING_CATEGORY),
+    group = ~ZONING_CATEGORY) %>%
+   addLayersControl(
+    overlayGroups = c("Single Family Residential", "Multi-Family Residential", "Commercial", "Public Land", "Property Prices", "Vacant Lots"),
+    options = layersControlOptions(collapsed = FALSE)) %>%
+  addLegend(
+    colors = c("blue", "orange", "red", "purple"),
+    labels = c("Single Family Residential", "Multi-Family Residential", "Commercial", "Public Land"),
+    title = "Zoning Types") %>%
+  addLegend(
+    pal = price_pal,
+    values = property_wgs84$price_bin,
+    title = "Property Prices",
+    group = "Property Prices") %>%
+  addLegend(
+    colors = "red",
+    labels = "Vacant Lots",
+    title = "Special Markers",
+    group = "Vacant Lots")
+
+airport_current_land
+```
+
+
